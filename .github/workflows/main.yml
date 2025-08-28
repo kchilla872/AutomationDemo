@@ -16,27 +16,45 @@ jobs:
       uses: actions/checkout@v4
       
     - name: Set up Python
-      uses: actions/setup-python@v4
+      uses: actions/setup-python@v5
       with:
-        python-version: '3.x' # Specify your Python version
+        python-version: '3.11' # Specify a stable Python version
         
-    - name: Create virtual environment
+    - name: Cache pip dependencies
+      uses: actions/cache@v4
+      with:
+        path: ~\AppData\Local\pip\Cache
+        key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
+        restore-keys: |
+          ${{ runner.os }}-pip-
+        
+    - name: Create virtual environment and install dependencies
       run: |
         python -m venv venv
-        
-    - name: Activate virtual environment and install dependencies
-      run: |
         .\venv\Scripts\Activate.ps1
+        python -m pip install --upgrade pip
         pip install -r requirements.txt
+      shell: powershell
         
     - name: Install Playwright browsers
       run: |
         .\venv\Scripts\Activate.ps1
         playwright install chromium --with-deps
+      shell: powershell
+      
+    - name: Cache Playwright browsers
+      uses: actions/cache@v4
+      with:
+        path: ~\AppData\Local\ms-playwright
+        key: ${{ runner.os }}-playwright-${{ hashFiles('**/requirements.txt') }}
+        restore-keys: |
+          ${{ runner.os }}-playwright-
         
     - name: Clean and prepare allure directories
       run: |
-        if (Test-Path "allure-results") { Remove-Item -Recurse -Force "allure-results" }
+        if (Test-Path "allure-results") { 
+          Remove-Item -Recurse -Force "allure-results" 
+        }
         if (Test-Path "allure-report") { 
           if (Test-Path "allure-report\history") {
             New-Item -ItemType Directory -Force -Path "allure-results"
@@ -44,44 +62,88 @@ jobs:
           }
           Remove-Item -Recurse -Force "allure-report"
         }
+        New-Item -ItemType Directory -Force -Path "allure-results"
       shell: powershell
       
     - name: Run Playwright tests
       run: |
         .\venv\Scripts\Activate.ps1
         pytest test_homePage.py -v --alluredir=allure-results
+      shell: powershell
       continue-on-error: true # Continue even if tests fail
       
+    - name: Install Allure CLI
+      run: |
+        Invoke-WebRequest -Uri "https://github.com/allure-framework/allure2/releases/download/2.24.0/allure-2.24.0.zip" -OutFile "allure.zip"
+        Expand-Archive -Path "allure.zip" -DestinationPath "."
+        $env:PATH += ";$pwd\allure-2.24.0\bin"
+        echo "$pwd\allure-2.24.0\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+      shell: powershell
+      if: always()
+      
     - name: Generate Allure Report
-      uses: simple-elf/allure-report-action@master
-      if: always() # Run even if previous steps failed
-      with:
-        allure_results: allure-results
-        allure_report: allure-report
-        gh_pages: allure-report
-        
+      run: |
+        allure generate allure-results -o allure-report --clean
+      shell: powershell
+      if: always()
+      
     - name: Upload Allure Results
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v4
       if: always()
       with:
         name: allure-results
         path: allure-results/
         retention-days: 30
+        compression-level: 6
         
     - name: Upload Allure Report
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v4
       if: always()
       with:
         name: allure-report
         path: allure-report/
         retention-days: 30
+        compression-level: 6
         
-    - name: Archive test results
-      uses: actions/upload-artifact@v3
+    - name: Upload Test Results Summary
+      uses: actions/upload-artifact@v4
       if: always()
       with:
-        name: test-results
+        name: test-summary
         path: |
           allure-results/
           allure-report/
         retention-days: 30
+        compression-level: 6
+        
+    - name: Deploy Allure Report to GitHub Pages (Optional)
+      uses: peaceiris/actions-gh-pages@v3
+      if: always() && github.ref == 'refs/heads/main'
+      with:
+        github_token: ${{ secrets.GITHUB_TOKEN }}
+        publish_dir: ./allure-report
+        destination_dir: allure-reports/${{ github.run_number }}
+        
+    - name: Comment PR with Allure Report Link
+      uses: actions/github-script@v7
+      if: always() && github.event_name == 'pull_request'
+      with:
+        script: |
+          const runId = context.runId;
+          const runNumber = context.runNumber;
+          const repoUrl = context.payload.repository.html_url;
+          const reportUrl = `${repoUrl}/actions/runs/${runId}`;
+          
+          github.rest.issues.createComment({
+            issue_number: context.issue.number,
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            body: `## 🧪 Test Results
+            
+            **Test run completed!** 
+            
+            📊 [View Allure Report Artifacts](${reportUrl})
+            📈 Run Number: ${runNumber}
+            
+            Download the \`allure-report\` artifact to view the detailed test report locally.`
+          });
