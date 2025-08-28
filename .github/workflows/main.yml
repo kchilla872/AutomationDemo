@@ -1,36 +1,87 @@
-pipeline {
-    agent any
+name: Setup and Test Pipeline
 
-    stages {
-        stage('Setup and Test') {
-            steps {
-                script {
-                    bat '''
-                        cd "C:\\Users\\karthik.chillara\\PycharmProjects\\DemoParallel0622"
-                        call venv\\Scripts\\activate
-                        pip install -r requirements.txt
-                        playwright install chromium --with-deps
-                        if exist allure-results rmdir /s /q allure-results
-                        if exist allure-report rmdir /s /q allure-report
-                        if exist allure-report\\history (
-                            mkdir allure-results
-                            xcopy /E /I /Y allure-report\\history allure-results\\history
-                        )
-                        pytest test_homePage.py -v --alluredir=allure-results
-                    '''
-                }
-            }
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main, develop ]
+  workflow_dispatch: # Allows manual triggering
+
+jobs:
+  setup-and-test:
+    runs-on: windows-latest
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.x' # Specify your Python version
+        
+    - name: Create virtual environment
+      run: |
+        python -m venv venv
+        
+    - name: Activate virtual environment and install dependencies
+      run: |
+        .\venv\Scripts\Activate.ps1
+        pip install -r requirements.txt
+        
+    - name: Install Playwright browsers
+      run: |
+        .\venv\Scripts\Activate.ps1
+        playwright install chromium --with-deps
+        
+    - name: Clean and prepare allure directories
+      run: |
+        if (Test-Path "allure-results") { Remove-Item -Recurse -Force "allure-results" }
+        if (Test-Path "allure-report") { 
+          if (Test-Path "allure-report\history") {
+            New-Item -ItemType Directory -Force -Path "allure-results"
+            Copy-Item -Recurse -Force "allure-report\history" "allure-results\history"
+          }
+          Remove-Item -Recurse -Force "allure-report"
         }
-        // Optionally, keep this if you want to archive the HTML report
-        stage('Archive Allure Report') {
-            steps {
-                archiveArtifacts artifacts: 'allure-report/**', allowEmptyArchive: true
-            }
-        }
-    }
-    post {
-        always {
-            allure includeProperties: false, jdk: '', results: [[path: 'allure-results']]
-        }
-    }
-}
+      shell: powershell
+      
+    - name: Run Playwright tests
+      run: |
+        .\venv\Scripts\Activate.ps1
+        pytest test_homePage.py -v --alluredir=allure-results
+      continue-on-error: true # Continue even if tests fail
+      
+    - name: Generate Allure Report
+      uses: simple-elf/allure-report-action@master
+      if: always() # Run even if previous steps failed
+      with:
+        allure_results: allure-results
+        allure_report: allure-report
+        gh_pages: allure-report
+        
+    - name: Upload Allure Results
+      uses: actions/upload-artifact@v3
+      if: always()
+      with:
+        name: allure-results
+        path: allure-results/
+        retention-days: 30
+        
+    - name: Upload Allure Report
+      uses: actions/upload-artifact@v3
+      if: always()
+      with:
+        name: allure-report
+        path: allure-report/
+        retention-days: 30
+        
+    - name: Archive test results
+      uses: actions/upload-artifact@v3
+      if: always()
+      with:
+        name: test-results
+        path: |
+          allure-results/
+          allure-report/
+        retention-days: 30
